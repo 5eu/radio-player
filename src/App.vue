@@ -12,13 +12,17 @@
       <!-- SPLIT DRUM CONTAINER -->
       <div class="dual-drum-container">
         <!-- LEFT DRUM: CATEGORIES -->
-        <!-- Removed explicit touchstart/end handlers, relying on scroll detection now -->
         <div
           class="category-viewport"
           ref="catDrumRef"
           @scroll="handleCategoryScroll"
+          @touchstart="onLeftDrumInteraction"
+          @mousedown="onLeftDrumInteraction"
         >
           <ul class="category-list">
+            <!-- Top Spacer for alignment -->
+            <div class="list-spacer"></div>
+
             <li
               v-for="(cat, index) in categories"
               :key="cat"
@@ -28,6 +32,9 @@
             >
               {{ cat }}
             </li>
+
+            <!-- Bottom Spacer -->
+            <div class="list-spacer"></div>
           </ul>
           <!-- Visual guide line -->
           <div class="cat-guide-line"></div>
@@ -38,8 +45,12 @@
           class="drum-viewport"
           ref="drumRef"
           @touchstart="onRightDrumInteraction"
+          @mousedown="onRightDrumInteraction"
         >
           <ul class="station-list">
+            <!-- Top Spacer for alignment -->
+            <div class="list-spacer"></div>
+
             <li
               v-for="(station, index) in stations"
               :key="index"
@@ -51,31 +62,37 @@
                 <span class="station-name">{{ station.name }}</span>
               </div>
             </li>
+
+            <!-- Bottom Spacer -->
+            <div class="list-spacer"></div>
           </ul>
         </div>
       </div>
 
       <!-- Floating Control Deck -->
       <div class="control-deck">
-        <button
-          class="mech-btn"
-          :class="{ 'is-playing': isPlaying, 'is-loading': isLoading }"
-          @click="togglePlayback"
-        >
-          <div class="mech-btn-face">
-            <div v-if="!isPlaying && !isLoading" class="icon-play"></div>
-            <div v-else class="icon-pause">
-              <div class="bar"></div>
-              <div class="bar"></div>
+        <div class="deck-content">
+          <button
+            class="mech-btn"
+            :class="{ 'is-playing': isPlaying, 'is-loading': isLoading }"
+            @click="togglePlayback"
+          >
+            <div class="mech-btn-face">
+              <div v-if="!isPlaying && !isLoading" class="icon-play"></div>
+              <div v-else class="icon-pause">
+                <div class="bar"></div>
+                <div class="bar"></div>
+              </div>
             </div>
-          </div>
-        </button>
+          </button>
 
-        <div class="system-status">
-          <div class="status-content">
-            SYSTEM: <span :class="{ blink: isLoading }">{{ statusText }}</span>
-            <span class="divider">//</span>
-            CH: <span>{{ currentChannelId }}</span>
+          <div class="system-status">
+            <div class="status-content">
+              SYSTEM:
+              <span :class="{ blink: isLoading }">{{ statusText }}</span>
+              <span class="divider">//</span>
+              CH: <span>{{ currentChannelId }}</span>
+            </div>
           </div>
         </div>
       </div>
@@ -137,9 +154,11 @@ const activeIndex = ref(3);
 const isProgrammaticScroll = ref(false);
 const isResizing = ref(false);
 
-// State for Left Drum Interaction
+// State for Interaction
 const isBrowsingCategory = ref(false);
 const manualVisualCategory = ref("");
+const isSyncingLeft = ref(false); // LOCK: Prevents circular updates
+let syncLockTimer = null;
 
 // Physics State
 const itemTransforms = ref(
@@ -186,11 +205,13 @@ let catScrollDebounce = null;
 const handleCategoryScroll = () => {
   if (!catDrumRef.value) return;
 
-  // Flag that user is interacting with left drum
+  // LOCK: If this scroll is caused by "Right driving Left", IGNORE it.
+  if (isSyncingLeft.value) return;
+
   isBrowsingCategory.value = true;
   clearTimeout(catScrollDebounce);
 
-  // Update visual highlight immediately
+  // Update visual highlight
   const scrollTop = catDrumRef.value.scrollTop;
   const centerIndex = Math.round(scrollTop / catItemHeight);
 
@@ -198,52 +219,71 @@ const handleCategoryScroll = () => {
     manualVisualCategory.value = categories.value[centerIndex];
   }
 
-  // Debounce: If scrolling stops for 300ms, commit the selection
+  // Debounce: Only trigger if user STOPS scrolling left drum
   catScrollDebounce = setTimeout(() => {
-    if (manualVisualCategory.value) {
-      scrollToCategory(manualVisualCategory.value);
+    // Only jump if selected category is different
+    if (
+      manualVisualCategory.value &&
+      manualVisualCategory.value !== activeCategory.value
+    ) {
+      performCategoryJump(manualVisualCategory.value);
     }
   }, 300);
 };
 
-// 2. CLICK CATEGORY (Immediate Selection)
+// 2. CLICK CATEGORY (Direct Jump)
 const scrollToCategory = (category) => {
-  // Cancel any pending auto-select from scrolling to avoid double-jumps
   clearTimeout(catScrollDebounce);
+  performCategoryJump(category);
+};
 
-  // Stop "browsing mode" so syncing logic takes over
+// Internal helper for jumping
+const performCategoryJump = (category) => {
   isBrowsingCategory.value = false;
   manualVisualCategory.value = category;
 
   const targetIndex = stations.value.findIndex((s) => s.category === category);
   if (targetIndex !== -1) {
-    // Jump right drum
     onStationClick(targetIndex);
 
-    // Force center the left drum immediately
     nextTick(() => {
       syncCategoryDrum(true);
     });
   }
 };
 
-// 3. RIGHT DRUM INTERACTION
-const onRightDrumInteraction = () => {
-  // If user touches right drum, stop left drum browsing mode immediately
-  isBrowsingCategory.value = false;
-  clearTimeout(catScrollDebounce);
+const onLeftDrumInteraction = () => {
+  isSyncingLeft.value = false;
+  if (syncLockTimer) clearTimeout(syncLockTimer);
 };
 
-// 4. SYNC LEFT DRUM TO ACTIVE STATION
+// 3. RIGHT DRUM INTERACTION
+const onRightDrumInteraction = () => {
+  clearTimeout(catScrollDebounce);
+  isBrowsingCategory.value = false;
+};
+
+// 4. SYNC LEFT DRUM TO ACTIVE STATION (Right drives Left)
 const syncCategoryDrum = (force = false) => {
   if (!catDrumRef.value) return;
-  // If user is busy with left drum, don't interrupt
+
   if (isBrowsingCategory.value && !force) return;
 
   const catIndex = categories.value.indexOf(activeCategory.value);
   if (catIndex !== -1) {
     const targetScroll = catIndex * catItemHeight;
+
+    if (Math.abs(catDrumRef.value.scrollTop - targetScroll) < 5 && !force)
+      return;
+
+    isSyncingLeft.value = true;
+    if (syncLockTimer) clearTimeout(syncLockTimer);
+
     catDrumRef.value.scrollTo({ top: targetScroll, behavior: "smooth" });
+
+    syncLockTimer = setTimeout(() => {
+      isSyncingLeft.value = false;
+    }, 800);
   }
 };
 
@@ -292,6 +332,7 @@ const onStationClick = (index) => {
 const updatePhysics = () => {
   if (!drumRef.value) return;
   const drum = drumRef.value;
+  // Safety check to avoid NaN crash
   if (!drum.clientHeight || drum.clientHeight === 0) return;
 
   const viewportCenter = drum.scrollTop + drum.clientHeight / 2;
@@ -299,8 +340,21 @@ const updatePhysics = () => {
   let closestIndex = -1;
 
   stations.value.forEach((_, i) => {
-    const padding = drum.clientHeight / 2 - itemHeight / 2;
-    const itemCenter = padding + i * itemHeight + itemHeight / 2;
+    // FIX: Using Spacers means we calculate item center directly
+    // The spacer pushes the first item (i=0) to exactly (spacerHeight + itemHeight/2)
+    // Spacer is 50% of container height.
+    // So itemCenter = (containerHeight / 2) + (i * itemHeight) + (itemHeight / 2)
+    // Wait, spacers are part of scroll flow.
+    // Correct logic: Item offsetTop will include the top spacer.
+    // Spacer height is approx 50vh - half item height.
+
+    // Instead of querying DOM (slow), we use math assuming spacer is correct.
+    // Padding logic was: padding + i*h + h/2.
+    // Spacer logic is identical: spacerHeight + i*h + h/2.
+    // Let's use the container half-height as the "Start Line"
+
+    const startOffset = drum.clientHeight / 2 - itemHeight / 2;
+    const itemCenter = startOffset + i * itemHeight + itemHeight / 2;
     const distance = viewportCenter - itemCenter;
 
     if (Math.abs(distance) < Math.abs(closestDist)) {
@@ -423,6 +477,16 @@ const handleResize = () => {
 
 const scrollToItem = (index) => {
   if (!drumRef.value) return;
+  // Calculate scroll based on spacer height
+  // Spacer = 50% height - half item height
+  // ScrollTop 0 = Top of spacer.
+  // We want item centered. Item center is at Spacer + i*h + h/2.
+  // Viewport center is at 50% height.
+  // So Target ScrollTop = (Spacer + i*h + h/2) - (ViewportHeight / 2)
+  // Spacer = (ViewportHeight / 2) - (h / 2)
+  // Target = ((VH/2 - h/2) + i*h + h/2) - VH/2
+  // Target = VH/2 - h/2 + i*h + h/2 - VH/2 = i*h
+  // Math simplifies beautifully to just index * itemHeight!
   const targetScroll = index * itemHeight;
   drumRef.value.scrollTo({ top: targetScroll, behavior: "smooth" });
 };
@@ -529,6 +593,16 @@ body {
   overflow: hidden;
 }
 
+/* --- SPACER SYSTEM FOR PERFECT CENTERING --- */
+/* This replaces the unreliable padding-top/bottom */
+.list-spacer {
+  /* Height = 50% of container - Half Item Height */
+  /* This ensures the first/last items sit exactly in the middle */
+  height: calc(50% - 40px); /* 40px is half of 80px item height */
+  width: 100%;
+  pointer-events: none;
+}
+
 /* 1. LEFT DRUM: CATEGORIES (Coarse) */
 .category-viewport {
   width: 25%; /* Takes up left side */
@@ -555,10 +629,16 @@ body {
 }
 
 .category-list {
-  padding: calc(50vh - 25px) 0; /* Center padding */
   margin: 0;
+  padding: 0;
   list-style: none;
   text-align: right; /* Align text close to the main drum */
+  height: 100%; /* Ensure spacers work */
+}
+
+/* Special spacer override for category list (smaller items) */
+.category-list .list-spacer {
+  height: calc(50% - 25px); /* 25px is half of 50px item height */
 }
 
 .category-item {
@@ -574,6 +654,8 @@ body {
   cursor: pointer;
   scroll-snap-align: center; /* Snap items */
   transition: all 0.2s ease;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .category-item.cat-active {
@@ -607,10 +689,11 @@ body {
 }
 
 .station-list {
-  padding: max(0px, calc(50vh - 40px)) 0;
   margin: 0;
+  padding: 0;
   list-style: none;
   transform-style: preserve-3d;
+  height: 100%;
 }
 
 .station-item {
@@ -655,11 +738,12 @@ body {
   box-shadow: 0 0 30px rgba(0, 0, 0, 0.5);
 }
 
-/* Notches align with Main Drum (shifted right slightly due to cat drum) */
+/* Notches align with Main Drum Center */
+/* CALCULATION: 25% (Left Drum) + 75% (Right Drum) / 2 = 62.5% */
 .notch-top,
 .notch-bottom {
   position: absolute;
-  left: 62.5%; /* Center of the RIGHT drum (approx 25% + 75%/2) */
+  left: 62.5%;
   transform: translateX(-50%);
   width: 0;
   height: 0;
@@ -684,10 +768,19 @@ body {
   width: 100%;
   display: flex;
   flex-direction: column;
-  align-items: center;
+  /* ALIGNMENT FIX: Use padding to align items to the right drum's center */
+  padding-left: 25%;
+  box-sizing: border-box;
+  align-items: center; /* Center items within the remaining 75% width */
   justify-content: flex-end;
   z-index: 20;
   pointer-events: none;
+}
+
+.deck-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
 }
 
 .mech-btn {
@@ -799,6 +892,7 @@ body {
     right: 0;
     height: 100%;
     display: block;
+    padding-left: 0; /* Reset padding for landscape custom positioning */
     pointer-events: none;
   }
   .mech-btn {
